@@ -1,96 +1,103 @@
 // /src/indexer/indexer.js
-// WORKER 4 — HEAVY ANALYTICS ENGINE (trustlines + AMM + LP + metrics + dynamic pools)
+// Single-service TEST: run scanners here (WORKER_ROLE=api is fine).
+// Stagger 90s * WORKER_ID so extra workers can be added later without colliding.
 
-import path from 'path';
-import { fileURLToPath } from 'url';
+import path from "path";
+import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 import dotenv from "dotenv";
 dotenv.config();
 
-// ------------------------------------------------------
-// STAGGERED WORKER STARTUP (UNIFIED 90s MODEL)
-// ------------------------------------------------------
-const workerId = Number(process.env.WORKER_ID || 4);
+const workerId = Number(process.env.WORKER_ID || 1);
+const totalWorkers = Number(process.env.TOTAL_WORKERS || 1);
+const workerRole = String(process.env.WORKER_ROLE || "api").toLowerCase();
 
-// Unified: 90s per worker ID
-const startupDelay = workerId * 90000; // 90s per worker
-
-// Heavy worker → larger warm-up
+const startupDelay = workerId * 90000;
 const baseWarmupDelay = 8000;
 const extraWarmupForHeavyWorker = 20000;
 const warmupDelay = baseWarmupDelay + extraWarmupForHeavyWorker;
 
 console.log(
-  `Worker ${workerId} scheduled (delay ${(startupDelay + warmupDelay) / 1000}s) — API can boot immediately`
+  `Worker ${workerId}/${totalWorkers} role=${workerRole} scheduled (delay ${(startupDelay + warmupDelay) / 1000}s) — API can boot immediately`
 );
 
-// IMPORTS
 import staticPools from "./pools.js";
 import { logger } from "../../utils/logger.js";
 import { updateHealthTimestamp } from "../../health.js";
 import { pool } from "../../db.js";
 import { writeTokenMetrics, writeActivityHistory } from "../../dbWriter.js";
-
 import { wsReady, fullReady } from "../../xrplClient.js";
-
-// TRUSTLINE SCANNER
 import { runTrustlineScanner } from "./trustlineScanner.js";
-
-// AMM + LP SCANNERS
 import { runAmmScannerXio } from "../ammScannerXio.js";
 import { runLpScanner } from "../lpScanner.js";
 
-// ------------------------------------------------------
-// UTILS
-// ------------------------------------------------------
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
 const METRICS_INTERVAL_MS = 60 * 1000;
+const XIO_TOTAL_SUPPLY = 10_000;
 let lastMetricsRun = 0;
 
-// ------------------------------------------------------
-// MAIN INDEXER LOOP
-// ------------------------------------------------------
+async function backfillActivityFromInftf() {
+  try {
+    const countRes = await pool.query("SELECT COUNT(*)::int AS n FROM token_activity_history");
+    if ((countRes.rows[0]?.n || 0) >= 10) return;
+    const issuer = process.env.XIO_ISSUER || "rfuzioNFTKArnU1PQD5BEF272vpbHMRoxU";
+    const url = `https://xrpldata.inftf.org/v1/iou/market_data/${issuer}_XIO/XRP?interval=1d&start=2021-10-24T00:00:00Z&limit=1000`;
+    const rows = await fetch(url, {
+      headers: { Accept: "application/json", "User-Agent": "DPMF-XIO-Indexer" },
+      signal: AbortSignal.timeout(30_000),
+    }).then((r) => r.json()).catch(() => []);
+    if (!Array.isArray(rows) || !rows.length) return;
+    let inserted = 0;
+    for (const row of rows) {
+      const close = Number(row.close);
+      const ts = row.timestamp;
+      if (!(close > 0) || !ts) continue;
+      await pool.query(
+        `INSERT INTO token_activity_history (timestamp, price, volume, marketcap, rank, traders, holders)
+         VALUES ($1, $2, $3, $4, 0, 0, 0)`,
+        [ts, close, Number(row.base_volume) || 0, close * 9983]
+      );
+      inserted += 1;
+    }
+    logger.info("SYSTEM", `Backfilled ${inserted} InFTF daily XIO/XRP prints into token_activity_history`);
+  } catch (err) {
+    logger.warn("SYSTEM", `Activity backfill skipped: ${err?.message || err}`);
+  }
+}
+
 async function startIndexer() {
-  console.log(
-    `Worker ${workerId} starting in ${(startupDelay + warmupDelay) / 1000}s…`
-  );
+  console.log(`Worker ${workerId} starting in ${(startupDelay + warmupDelay) / 1000}s…`);
   await new Promise((r) => setTimeout(r, startupDelay + warmupDelay));
   console.log("ENV CHECK:", {
     XIO_ISSUER: process.env.XIO_ISSUER,
-    RLUSD_ISSUER: process.env.RLUSD_ISSUER,
     AMM_ACCOUNT: process.env.AMM_ACCOUNT,
-    RLUSD_AMM_ACCOUNT: process.env.RLUSD_AMM_ACCOUNT,
     LP_ISSUER: process.env.LP_ISSUER,
     LP_CURRENCY_HEX: process.env.LP_CURRENCY_HEX,
-    XIO_CURRENCY: process.env.XIO_CURRENCY,
-    RLUSD_CURRENCY_HEX: process.env.RLUSD_CURRENCY_HEX,
+    WORKER_ID: process.env.WORKER_ID,
+    WORKER_ROLE: process.env.WORKER_ROLE,
+    TOTAL_WORKERS: process.env.TOTAL_WORKERS,
   });
   logger.info("SYSTEM", "Waiting for XRPL clients to be ready…");
-
   await wsReady;
   await fullReady;
-
-  logger.info("SYSTEM", "XRPL clients ready — starting Worker 4 heavy analytics loop");
+  logger.info("SYSTEM", "XRPL clients ready — starting holder/AMM/LP/metrics loop");
+  await backfillActivityFromInftf();
 
   while (true) {
-    logger.cycle("Starting new Worker 4 cycle");
+    logger.cycle("Starting new indexer cycle");
     updateHealthTimestamp();
-
     const cycleStart = Date.now();
 
-    // TRUSTLINE SCAN
     try {
-      logger.info("HOLDERS", "Running XIO trustline scan (ledger_data)…");
+      logger.info("HOLDERS", "Running XIO trustline scan (account_lines)…");
       await runTrustlineScanner();
       logger.info("HOLDERS", "XIO trustline scan completed");
     } catch (err) {
       logger.error("HOLDERS", "Trustline scanner crashed", err);
     }
 
-    // AMM + LP SCAN (HEAVY)
     try {
       logger.info("AMM", "Running XIO AMM scan (all pools)…");
       await runAmmScannerXio();
@@ -107,59 +114,49 @@ async function startIndexer() {
       logger.error("LP", "XIO LP scan crashed", err);
     }
 
-    // METRICS + ACTIVITY HISTORY
     try {
       const now = Date.now();
       if (now - lastMetricsRun >= METRICS_INTERVAL_MS) {
-        const primaryPoolName = staticPools[0]?.name || "XRP/XIO";
-
+        const poolNames = [...new Set(staticPools.map((p) => p.name).filter(Boolean)), "XRP/XIO", "XIO/XRP"];
         const ammRes = await pool.query(
-          `
-          SELECT price
-          FROM amm_pool_snapshots
-          WHERE pool_name = $1
-          ORDER BY timestamp DESC
-          LIMIT 1
-          `,
-          [primaryPoolName]
+          `SELECT price, pool_name FROM amm_pool_snapshots
+           WHERE pool_name = ANY($1)
+           ORDER BY timestamp DESC LIMIT 1`,
+          [poolNames]
         );
-
         const price = Number(ammRes.rows[0]?.price || 0);
 
-        const holderResult = await pool.query(
-          "SELECT COUNT(*) AS holders FROM xio_holders"
-        );
-        const holders = Number(holderResult.rows[0].holders || 0);
-
-        const circResult = await pool.query(
-          "SELECT SUM(balance) AS circ FROM xio_holders"
-        );
-        const circulating = Number(circResult.rows[0].circ || 0);
-
-        const totalSupply = 10000000000;
+        const holderResult = await pool.query(`
+          SELECT
+            COUNT(*) FILTER (WHERE COALESCE(balance, 0) > 0) AS holders,
+            COUNT(*) AS trustlines,
+            COALESCE(SUM(balance) FILTER (WHERE COALESCE(balance, 0) > 0), 0) AS circ
+          FROM token_holders_latest
+        `);
+        const holders = Number(holderResult.rows[0]?.holders || 0);
+        const trustlines = Number(holderResult.rows[0]?.trustlines || 0);
+        const circulating = Number(holderResult.rows[0]?.circ || 0);
         const marketCap = price * circulating;
-        const fdv = price * totalSupply;
+        const fdv = price * XIO_TOTAL_SUPPLY;
 
         await writeTokenMetrics({
           marketCap,
           fdv,
           circulating,
-          totalSupply,
+          totalSupply: XIO_TOTAL_SUPPLY,
           holders,
-          trustlines: holders,
+          trustlines,
         });
-
         await writeActivityHistory({
           price,
           volume: 0,
           marketcap: marketCap,
-          rank: 18,
+          rank: 0,
           traders: holders,
           holders,
         });
-
         lastMetricsRun = now;
-        logger.info("SYSTEM", "Metrics/activity history updated");
+        logger.info("SYSTEM", `Metrics/activity updated holders=${holders} trustlines=${trustlines} price=${price}`);
       } else {
         logger.info("SYSTEM", "Skipping metrics/activity (waiting for interval)");
       }
@@ -167,23 +164,13 @@ async function startIndexer() {
       logger.error("SYSTEM", "Metrics/activity history crashed", err);
     }
 
-    const cycleEnd = Date.now();
-    const duration = ((cycleEnd - cycleStart) / 1000).toFixed(2);
-
-    logger.info("SYSTEM", `Worker 4 cycle completed in ${duration}s`);
+    const duration = ((Date.now() - cycleStart) / 1000).toFixed(2);
+    logger.info("SYSTEM", `Indexer cycle completed in ${duration}s`);
     updateHealthTimestamp();
-
-    // HEAVY WORKER CYCLE SPACING
     const cycleSpacing = 45000 + workerId * 3000;
-    logger.info("SYSTEM", `Waiting ${cycleSpacing / 1000}s before next Worker 4 cycle`);
+    logger.info("SYSTEM", `Waiting ${cycleSpacing / 1000}s before next cycle`);
     await sleep(cycleSpacing);
   }
 }
 
-startIndexer().catch((err) => {
-  logger.error("SYSTEM", "Fatal error in Worker 4 heavy indexer", err);
-  process.exit(1);
-});
-
 export { startIndexer };
-

@@ -1,7 +1,7 @@
 const TOKEN_TYPE = "Digital Asset";
-const ISSUER_FEE = 0; // 0% issuer fee
+const ISSUER_FEE = 0;
 const BLACKHOLED = true;
-const CREATED = "2021-01-01"; // adjust to exact issuance date if needed
+const CREATED = "2021-10-24";
 
 export default async function tokenDetailsStatic(req, res) {
   try {
@@ -9,9 +9,8 @@ export default async function tokenDetailsStatic(req, res) {
       tokenType: TOKEN_TYPE,
       issuerFee: `${ISSUER_FEE}%`,
       blackholed: BLACKHOLED,
-      created: CREATED
+      created: CREATED,
     };
-
     if (res?.json) return res.json(response);
     return response;
   } catch (err) {

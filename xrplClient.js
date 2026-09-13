@@ -95,6 +95,12 @@ function adjustDelay(errMessage) {
   }
 }
 
+function rpcResult(response) {
+  if (!response) return null;
+  if (response.result && typeof response.result === "object") return response.result;
+  return response;
+}
+
 /* ------------------------------------------------------
    DEFAULT RPC REQUEST (trustlines + holders + Xaman)
 ------------------------------------------------------ */
@@ -117,7 +123,7 @@ export async function rpcRequest(body) {
     });
 
     adjustDelay(null);
-    return { result: response };
+    return { result: rpcResult(response) };
   } catch (err) {
     adjustDelay(err.message || err);
     console.error("[XRPL RPC ERROR]", err.message || err);
@@ -142,7 +148,7 @@ export async function rpcRequestFull(body) {
     });
 
     adjustDelay(null);
-    return { result: response };
+    return { result: rpcResult(response) };
   } catch (err) {
     adjustDelay(err.message || err);
     console.error("[XRPL FULL RPC ERROR]", err.message || err);
@@ -227,9 +233,10 @@ export async function fetchAllTrustlines(account) {
       params: [params],
     });
 
-    if (!json?.result?.lines) break;
+    const lines = json?.result?.lines;
+    if (!Array.isArray(lines)) break;
 
-    all.push(...json.result.lines);
+    all.push(...lines);
 
     if (!json.result.marker) break;
 
@@ -294,7 +301,8 @@ export async function discoverXioPools(xioCurrency, xioIssuer) {
     const response = await client.request(request);
     adjustDelay(null);
 
-    const state = response?.state || [];
+    const payload = response?.result || response;
+    const state = payload?.state || [];
     for (const entry of state) {
       if (entry.LedgerEntryType !== "AMM") continue;
 
@@ -302,11 +310,11 @@ export async function discoverXioPools(xioCurrency, xioIssuer) {
         entry;
 
       const isXioInAsset =
-        Asset?.currency === xioCurrency &&
+        (Asset?.currency === xioCurrency || Asset?.currency === "XIO") &&
         (!Asset?.issuer || Asset?.issuer === xioIssuer);
 
       const isXioInAsset2 =
-        Asset2?.currency === xioCurrency &&
+        (Asset2?.currency === xioCurrency || Asset2?.currency === "XIO") &&
         (!Asset2?.issuer || Asset2?.issuer === xioIssuer);
 
       if (!isXioInAsset && !isXioInAsset2) continue;
@@ -320,11 +328,9 @@ export async function discoverXioPools(xioCurrency, xioIssuer) {
       });
     }
 
-    if (!response?.marker) break;
-    marker = response.marker;
+    if (!payload?.marker) break;
+    marker = payload.marker;
   }
 
   return pools;
 }
-
-

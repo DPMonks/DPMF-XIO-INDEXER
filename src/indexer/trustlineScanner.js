@@ -1,97 +1,49 @@
-// src/indexer/trustlineScanner.js — DIAGNOSTIC‑ENABLED
+// src/indexer/trustlineScanner.js
+// Issuer account_lines — do NOT walk the whole ledger (rate-limit + 0-holder bug).
 
-import { rpcRequestFull } from "../../xrplClient.js";
+import { fetchAccountLines } from "../../xrplClient.js";
 import { logger } from "../../utils/logger.js";
-import { writeTokenHolders } from "../../dbWriter.js";
+import { writeTokenHolders, writeTokenHoldersHistory } from "../../dbWriter.js";
 
-const XIO_ISSUER = process.env.XIO_ISSUER;
-const XIO_CURRENCY_HEX = process.env.XIO_CURRENCY_HEX;
+const XIO_ISSUER = process.env.XIO_ISSUER || "rfuzioNFTKArnU1PQD5BEF272vpbHMRoxU";
+const XIO_CURRENCY_HEX = (
+  process.env.XIO_CURRENCY_HEX || "58494F0000000000000000000000000000000000"
+).toUpperCase();
 
-async function fetchRippleStates(marker = null) {
-  const req = {
-    method: "ledger_data",
-    params: [
-      {
-        ledger_index: "validated",
-        type: "state",
-        limit: 2048,
-        marker
-      }
-    ]
-  };
-
-  const json = await rpcRequestFull(req);
-  return json?.result || {};
-}
-
-function extractXioTrustlines(stateObjects) {
-  const holders = [];
-
-  for (const obj of stateObjects) {
-    if (obj.LedgerEntryType !== "RippleState") continue;
-
-    const low = obj.LowLimit;
-    const high = obj.HighLimit;
-
-    // 🔍 DEBUG: log ANY RippleState involving the issuer
-    if (low.issuer === XIO_ISSUER || high.issuer === XIO_ISSUER) {
-      logger.info("DEBUG_XIO_RIPPLESTATE", {
-        lowCurrency: low.currency,
-        highCurrency: high.currency,
-        lowIssuer: low.issuer,
-        highIssuer: high.issuer,
-        balance: obj.Balance?.value
-      });
-    }
-
-    const isLow =
-      low.issuer === XIO_ISSUER &&
-      low.currency === XIO_CURRENCY_HEX;
-
-    const isHigh =
-      high.issuer === XIO_ISSUER &&
-      high.currency === XIO_CURRENCY_HEX;
-
-    if (!isLow && !isHigh) continue;
-
-    const holder = isLow ? high.account : low.account;
-    const balance = Number(obj.Balance?.value || 0);
-
-    if (balance <= 0) continue;
-
-    holders.push({ account: holder, balance });
-  }
-
-  return holders;
+function isXioCurrency(code) {
+  const raw = String(code || "");
+  const up = raw.toUpperCase();
+  if (up === "XIO") return true;
+  if (up === XIO_CURRENCY_HEX) return true;
+  if (up.replace(/0+$/, "") === "58494F") return true;
+  return false;
 }
 
 export async function runTrustlineScanner() {
-  logger.info("HOLDERS", ">>> XRPL-CORRECT TRUSTLINE SCANNER ACTIVE (HEX + ISSUER) <<<");
+  logger.info("HOLDERS", "XIO trustline scan via issuer account_lines");
 
-  let marker = null;
+  const lines = await fetchAccountLines(XIO_ISSUER);
   const holderMap = new Map();
 
-  do {
-    const result = await fetchRippleStates(marker);
-    const objects = result.state || [];
-    const holders = extractXioTrustlines(objects);
+  for (const line of lines || []) {
+    if (!isXioCurrency(line.currency)) continue;
+    const account = line.account;
+    if (!account || account === XIO_ISSUER) continue;
+    const balance = Math.abs(Number(line.balance) || 0);
+    holderMap.set(account, {
+      account,
+      balance,
+      frozen: Boolean(line.freeze || line.frozen),
+      closed: false,
+      status: balance > 0 ? "active" : "empty",
+    });
+  }
 
-    for (const h of holders) {
-      holderMap.set(h.account, h.balance);
-    }
-
-    marker = result.marker || null;
-  } while (marker);
-
-  logger.info("HOLDERS", `Extracted ${holderMap.size} unique XIO holders`);
-
-  const holderArray = Array.from(holderMap, ([account, balance]) => ({
-    account,
-    balance
-  }));
+  const holderArray = [...holderMap.values()];
+  const withBal = holderArray.filter((h) => h.balance > 0).length;
+  logger.info("HOLDERS", `Extracted ${holderArray.length} XIO trustlines (${withBal} holders)`);
 
   await writeTokenHolders(holderArray);
-
+  await writeTokenHoldersHistory(holderArray);
   logger.info("HOLDERS", "XIO trustline scan completed");
 }
-

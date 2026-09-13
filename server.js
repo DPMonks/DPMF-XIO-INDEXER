@@ -22,6 +22,7 @@ import { fetchAmm } from "./src/tasks/amm.js";
 
 // Use Postgres for holder data now
 import { pool } from "./db.js";
+import "./ensureXioCompat.js";
 
 // API ROUTES
 import tokenDetails from "./api/token-details.js";
@@ -45,9 +46,6 @@ import { connectClients } from "./xrplClient.js";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ------------------------------------------------------
-// CORS
-// ------------------------------------------------------
 app.use(
   cors({
     origin: [
@@ -70,17 +68,9 @@ app.get('/', (_req, res) => {
   res.json({ ok: true, service: 'dpmf-xio-indexer' });
 });
 
-// ------------------------------------------------------
-// XAMAN SIGN-IN ROUTES
-// ------------------------------------------------------
 app.post("/api/xaman/create-payload", createPayloadBackend);
 app.get("/api/xaman/payload-result", payloadResult);
 
-// ------------------------------------------------------
-// DASHBOARD API ROUTES
-// ------------------------------------------------------
-
-// GET /api/top-holders (NEW — uses Postgres)
 app.get("/api/top-holders", async (req, res) => {
   try {
     const limit = Number(req.query.limit) || 100;
@@ -104,7 +94,6 @@ app.get("/api/top-holders", async (req, res) => {
   }
 });
 
-// GET /api/top-lp
 app.get("/api/top-lp", async (req, res) => {
   try {
     const limit = Number(req.query.limit) || 100;
@@ -140,7 +129,6 @@ app.get("/api/top-lp", async (req, res) => {
   }
 });
 
-// GET /api/amm
 app.get("/api/amm", async (req, res) => {
   try {
     const results = [];
@@ -163,38 +151,87 @@ app.get("/api/amm", async (req, res) => {
   }
 });
 
-// LIQUID PAIRS (XRP/RLUSD books + AMM marks — additive)
 app.get("/api/pairs", pairsHandler);
 app.get("/api/book/:base/:quote", bookHandler);
 app.get("/api/amm/:base/:quote", ammPairHandler);
 
-// TOKEN DETAILS + ACTIVITY CHART
 app.get("/api/token-details", tokenDetails);
 app.get("/api/activity-chart", activityChart);
+app.get("/api/charts/activity", activityChart);
+app.get("/api/overview", tokenDetails);
 
-// STATIC + LIVE TOKEN DETAILS
 app.get("/api/token-details-static", tokenDetailsStatic);
 app.get("/api/token-details-live", tokenDetailsLive);
 
-// ------------------------------------------------------
-// START EXPRESS SERVER
-// ------------------------------------------------------
+async function holderCounts(_req, res) {
+  try {
+    const result = await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE COALESCE(balance, 0) > 0)::int AS holders,
+        COUNT(*)::int AS trustlines,
+        MAX(updated_at) AS updated_at
+      FROM token_holders_latest
+    `);
+    const holders = Number(result.rows[0]?.holders || 0);
+    const trustlines = Number(result.rows[0]?.trustlines || 0);
+    res.json({
+      holders,
+      count: holders,
+      trustlines,
+      present: holders > 0,
+      catching_up: holders <= 0,
+      as_of: result.rows[0]?.updated_at || null,
+      source: "token_holders_latest",
+    });
+  } catch (err) {
+    console.error("[API][HOLDERS COUNT ERROR]", err);
+    res.status(500).json({ error: "Failed to count holders", catching_up: true, present: false });
+  }
+}
+
+async function lpCounts(req, res) {
+  try {
+    const want = String(req.query.pool || req.query.pair || "all").replace(/\s+/g, "").toUpperCase();
+    const result = await pool.query(`
+      SELECT pool_name,
+             COUNT(*) FILTER (WHERE COALESCE(lp_balance, 0) > 0)::int AS holders,
+             COUNT(*)::int AS trustlines
+      FROM lp_holders_latest
+      GROUP BY pool_name
+    `);
+    const rows = result.rows || [];
+    const match = (name) => {
+      const n = String(name || "").replace(/\s+/g, "").toUpperCase();
+      if (want === "ALL") return true;
+      return n === want || n === want.split("/").reverse().join("/");
+    };
+    const picked = rows.filter((r) => match(r.pool_name));
+    const holders = picked.reduce((s, r) => s + Number(r.holders || 0), 0);
+    const trustlines = picked.reduce((s, r) => s + Number(r.trustlines || 0), 0);
+    res.json({
+      holders,
+      count: holders,
+      trustlines,
+      pool: want,
+      present: holders > 0,
+      catching_up: holders <= 0,
+      source: "lp_holders_latest",
+    });
+  } catch (err) {
+    console.error("[API][LP COUNT ERROR]", err);
+    res.status(500).json({ error: "Failed to count LP holders", catching_up: true, present: false });
+  }
+}
+
+app.get("/api/holders/count", holderCounts);
+app.get("/api/trustlines/count", holderCounts);
+app.get("/api/lp-holders/count", lpCounts);
+app.get("/api/lp-trustlines/count", lpCounts);
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Indexer API listening on 0.0.0.0:${PORT}`);
 });
 
-// ------------------------------------------------------
-// CONNECT XRPL CLIENTS (REQUIRED FOR FULL-HISTORY + TRUSTLINE READINESS)
-// ------------------------------------------------------
 connectClients();
-
-// ------------------------------------------------------
-// LIQUID PAIR WATCHER (XRP/RLUSD books + AMM marks)
-// ------------------------------------------------------
 startLiquidPairWatcher();
-
-// ------------------------------------------------------
-// START INDEXER LOOP
-// ------------------------------------------------------
 startIndexer();
-
