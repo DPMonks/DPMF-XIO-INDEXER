@@ -51,7 +51,7 @@ const PORT = process.env.PORT || 3000;
 app.use(
   cors({
     origin: [
-      "https://dpmf-xio-dashboard-TEST.vercel.app",
+      "https://dpmf-xio-dashboard-test.vercel.app",
       "https://dpmf-xio-dashboard-iwrmet5ky-dpmf-s-projects.vercel.app",
       /\.vercel\.app$/,
       "http://localhost:5173"
@@ -62,6 +62,13 @@ app.use(
 );
 
 app.use(express.json());
+
+app.get('/health', (_req, res) => {
+  res.json({ ok: true, service: 'dpmf-xio-indexer', ts: new Date().toISOString() });
+});
+app.get('/', (_req, res) => {
+  res.json({ ok: true, service: 'dpmf-xio-indexer' });
+});
 
 // ------------------------------------------------------
 // XAMAN SIGN-IN ROUTES
