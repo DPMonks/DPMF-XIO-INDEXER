@@ -23,21 +23,8 @@ const extraWarmupForHeavyWorker = 20000;
 const warmupDelay = baseWarmupDelay + extraWarmupForHeavyWorker;
 
 console.log(
-  `Worker ${workerId} starting in ${(startupDelay + warmupDelay) / 1000}s…`
+  `Worker ${workerId} scheduled (delay ${(startupDelay + warmupDelay) / 1000}s) — API can boot immediately`
 );
-
-await new Promise((r) => setTimeout(r, startupDelay + warmupDelay));
-
-console.log("ENV CHECK:", {
-  XIO_ISSUER: process.env.XIO_ISSUER,
-  RLUSD_ISSUER: process.env.RLUSD_ISSUER,
-  AMM_ACCOUNT: process.env.AMM_ACCOUNT,
-  RLUSD_AMM_ACCOUNT: process.env.RLUSD_AMM_ACCOUNT,
-  LP_ISSUER: process.env.LP_ISSUER,
-  LP_CURRENCY_HEX: process.env.LP_CURRENCY_HEX,
-  XIO_CURRENCY: process.env.XIO_CURRENCY,
-  RLUSD_CURRENCY_HEX: process.env.RLUSD_CURRENCY_HEX,
-});
 
 // IMPORTS
 import staticPools from "./pools.js";
@@ -67,6 +54,20 @@ let lastMetricsRun = 0;
 // MAIN INDEXER LOOP
 // ------------------------------------------------------
 async function startIndexer() {
+  console.log(
+    `Worker ${workerId} starting in ${(startupDelay + warmupDelay) / 1000}s…`
+  );
+  await new Promise((r) => setTimeout(r, startupDelay + warmupDelay));
+  console.log("ENV CHECK:", {
+    XIO_ISSUER: process.env.XIO_ISSUER,
+    RLUSD_ISSUER: process.env.RLUSD_ISSUER,
+    AMM_ACCOUNT: process.env.AMM_ACCOUNT,
+    RLUSD_AMM_ACCOUNT: process.env.RLUSD_AMM_ACCOUNT,
+    LP_ISSUER: process.env.LP_ISSUER,
+    LP_CURRENCY_HEX: process.env.LP_CURRENCY_HEX,
+    XIO_CURRENCY: process.env.XIO_CURRENCY,
+    RLUSD_CURRENCY_HEX: process.env.RLUSD_CURRENCY_HEX,
+  });
   logger.info("SYSTEM", "Waiting for XRPL clients to be ready…");
 
   await wsReady;
