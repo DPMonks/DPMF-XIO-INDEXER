@@ -179,8 +179,8 @@ app.get("/api/token-details-live", tokenDetailsLive);
 // ------------------------------------------------------
 // START EXPRESS SERVER
 // ------------------------------------------------------
-app.listen(PORT, () => {
-  console.log(`Indexer API running on port ${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Indexer API listening on 0.0.0.0:${PORT}`);
 });
 
 // ------------------------------------------------------
